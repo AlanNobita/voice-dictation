@@ -1,0 +1,12 @@
+[project]
+name = "voice-dictation"
+version = "1.0.0"
+description = "Bangla-to-English voice dictation pipeline for Hyprland/Wayland"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "numpy",
+]
+
+[tool.uv]
+dev-dependencies = []

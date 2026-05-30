@@ -1,0 +1,3 @@
+# Allow non-root access to /dev/uinput for ydotool
+# Install to: /etc/udev/rules.d/99-uinput.rules
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

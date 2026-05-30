@@ -1,0 +1,15 @@
+[Unit]
+Description=Voice Dictation Translation Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/alan/Documents/code/voice
+ExecStart=/home/alan/Documents/code/voice/.venv/bin/python /home/alan/Documents/code/voice/server.py
+Restart=always
+Environment=WHISPER_MODEL=turbo
+Environment=WHISPER_DEVICE=auto
+Environment=WHISPER_COMPUTE=auto
+
+[Install]
+WantedBy=default.target

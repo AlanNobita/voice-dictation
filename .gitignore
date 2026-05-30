@@ -1,0 +1,18 @@
+# Environments
+.venv/
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Audio files
+*.wav
+*.flac
+*.mp3
+
+# Lock files
+uv.lock
+
+# Systemd (optional to ignore, but good to keep template separate)
+# voice-dictation.service
