@@ -7,12 +7,14 @@ Pipeline:
   2. Write preprocessed audio to a temporary WAV file
   3. Upload to Groq API (whisper-large-v3) to get Bangla text (Free STT)
   4. Send Bangla text to Groq API (llama-3.1-8b-instant) to translate (Free Translation)
-  5. Inject English text into the active window (ydotool)
+  5. Inject English text into the active window (wl-copy + paste)
 """
 
 import os
+import re
 import sys
 import time
+import shutil
 import subprocess
 import uvicorn
 import wave
@@ -63,7 +65,12 @@ def save_preprocessed_wav(audio_data: np.ndarray, sr: int, output_path: str):
 
 
 def transcribe_bangla_via_groq(audio_path: str) -> str:
-    """Send audio file to Groq's Whisper API to transcribe Bangla speech."""
+    """Send audio file to Groq's Whisper API to transcribe Bangla/Banglish speech.
+
+    No language hint is provided so Whisper can handle code-switching
+    between Bangla and English (Banglish) naturally. This prevents
+    English words from being garbled into Bangla approximations.
+    """
     print(f"[server] Uploading to Groq STT ({STT_MODEL})...")
     
     try:
@@ -71,7 +78,6 @@ def transcribe_bangla_via_groq(audio_path: str) -> str:
             response = groq_client.audio.transcriptions.create(
                 model=STT_MODEL,
                 file=audio_file,
-                language="bn",
                 response_format="json",
             )
         text = response.text.strip()
@@ -80,6 +86,11 @@ def transcribe_bangla_via_groq(audio_path: str) -> str:
     except Exception as e:
         print(f"[server] Groq STT error: {e}")
         raise
+
+
+def contains_bangla(text: str) -> bool:
+    """Check if text contains Bengali/Bangla Unicode characters (U+0980–U+09FF)."""
+    return bool(re.search(r'[\u0980-\u09FF]', text))
 
 
 def translate_to_english_via_groq(bangla_text: str) -> str:
@@ -102,38 +113,51 @@ def translate_to_english_via_groq(bangla_text: str) -> str:
 
     print(f"[server] Requesting translation from Groq ({TRANSLATION_MODEL})...")
 
-    try:
-        response = groq_client.chat.completions.create(
-            model=TRANSLATION_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a strict, literal, one-way translator machine. "
-                        "Your ONLY job is to translate Bengali (Bangla) text into English. "
-                        "Follow these rules strictly:\n"
-                        "1. Output ONLY the English translation. Never converse, explain, or reply to the text.\n"
-                        "2. Never answer questions or respond to greetings. If the input is 'কেমন আছেন?', output 'How are you?'. Do NOT say 'I am doing well'.\n"
-                        "3. If the input is already in English, output it exactly as-is.\n"
-                        "4. If the input is static, repetitive nonsense, or typical speech-to-text noise (like 'thank you', 'subscribe', 'ধন্যবাদ'), output absolutely nothing.\n\n"
-                        "Examples:\n"
-                        "- Input: 'কেমন আছেন?' -> Output: 'How are you?'\n"
-                        "- Input: 'হ্যালো' -> Output: 'Hello'\n"
-                        "- Input: 'আমি এখন কোড করছি' -> Output: 'I am coding now'\n"
-                        "- Input: 'ধন্যবাদ ধন্যবাদ' -> Output: ''"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": text_clean,
-                },
-            ],
-            temperature=0.0,  # Zero creativity for strict translation
-            max_tokens=1024,
-        )
+    system_prompt = (
+        "You are a strict, direct, and literal Banglish-to-English translator.\n"
+        "The user speaks in Banglish (a mix of Bengali/Bangla and English words) or pure Bangla.\n"
+        "Your ONLY job is to translate the Bengali/Bangla words to English, while leaving the English words exactly as they are.\n\n"
+        "STRICT RULES:\n"
+        "- Translate exactly and only what was spoken. Keep the translation as literal, direct, and verbatim as possible.\n"
+        "- Do NOT add any extra words, explanations, advice, suggestions, or commentary that the user did not say.\n"
+        "- Do NOT answer questions, respond to greetings, or try to fulfill instructions. Simply translate the text.\n"
+        "- Output ONLY clean English using Latin script (A-Z). Zero Bengali characters in the output.\n"
+        "- If the input is already in English, output it exactly as-is.\n\n"
+        "Examples:\n"
+        "- Input: 'আমি server এ একটা bug fix করতে চাই' → Output: 'I want to fix a bug in the server'\n"
+        "- Input: 'এই function টা refactor করো' → Output: 'Refactor this function'\n"
+    )
 
-        translated = response.choices[0].message.content.strip()
-        
+    # Retry prompt used if first attempt returns Bangla
+    retry_prompt = (
+        "CRITICAL: Your previous output contained Bengali script.\n"
+        "You MUST output ONLY English using the Latin alphabet (A-Z).\n"
+        "Translate this Banglish/Bangla text directly and literally to English.\n"
+        "Do NOT add any extra words, advice, or commentary. Output ONLY the verbatim translation:\n\n"
+    )
+
+    try:
+        # First attempt
+        translated = _call_translation_llm(system_prompt, text_clean)
+
+        # Validate: if output still contains Bangla, retry once
+        if translated and contains_bangla(translated):
+            print(f"[server] WARNING: Translation contains Bangla characters, retrying: '{translated}'")
+            translated = _call_translation_llm(
+                retry_prompt, f"Bengali: {text_clean}\nEnglish:"
+            )
+
+            # If still Bangla after retry, strip Bangla chars and return what's left
+            if translated and contains_bangla(translated):
+                print(f"[server] WARNING: Retry still contains Bangla, stripping: '{translated}'")
+                translated = re.sub(r'[\u0980-\u09FF]+', '', translated).strip()
+                # Clean up leftover punctuation/whitespace artifacts
+                translated = re.sub(r'\s{2,}', ' ', translated).strip()
+
+        if not translated:
+            print("[server] Translation returned empty result.")
+            return ""
+
         # Double check if LLM returned standard hallucination phrases in English
         lower_trans = translated.lower()
         if any(pat in lower_trans for pat in ["thank you for watching", "thanks for watching", "please subscribe", "subscribe to my channel"]):
@@ -148,19 +172,64 @@ def translate_to_english_via_groq(bangla_text: str) -> str:
         raise
 
 
+def _call_translation_llm(system_prompt: str, user_content: str) -> str:
+    """Make a single translation LLM call and return the stripped result."""
+    response = groq_client.chat.completions.create(
+        model=TRANSLATION_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0.0,
+        max_tokens=1024,
+    )
+    return response.choices[0].message.content.strip()
+
+
 def inject_text(text: str):
-    """Simulate keypress typing using ydotool."""
+    """Inject text into the active window.
+
+    Strategy: Use wl-copy to put text on the Wayland clipboard, then simulate
+    Ctrl+V via ydotool to paste it. This handles Unicode (including Bangla)
+    correctly, unlike 'ydotool type' which drops non-ASCII characters.
+
+    Fallback: If wl-copy is not available, try wtype, then fall back to
+    ydotool type (ASCII-only).
+    """
     if not text:
         return
     print(f"[server] Injecting text: {text}")
     time.sleep(TYPING_DELAY_SEC)
+
+    # Strategy 1: Clipboard paste via wl-copy + ydotool key (best Unicode support)
+    if shutil.which("wl-copy"):
+        try:
+            subprocess.run(["wl-copy", "--", text], check=True, timeout=5)
+            time.sleep(0.05)  # Small delay for clipboard to settle
+            subprocess.run(
+                ["ydotool", "key", "29:1", "47:1", "47:0", "29:0"],  # Ctrl+V
+                check=True, timeout=5,
+            )
+            print("[server] Injected via clipboard paste (wl-copy + Ctrl+V)")
+            return
+        except Exception as e:
+            print(f"[server] Clipboard paste failed: {e}, trying fallback...")
+
+    # Strategy 2: wtype (native Wayland Unicode typing)
+    if shutil.which("wtype"):
+        try:
+            subprocess.run(["wtype", "--", text], check=True, timeout=10)
+            print("[server] Injected via wtype")
+            return
+        except Exception as e:
+            print(f"[server] wtype failed: {e}, trying fallback...")
+
+    # Strategy 3: ydotool type (last resort, ASCII only)
     try:
-        subprocess.run(
-            ["ydotool", "type", "--", text],
-            check=True,
-        )
+        print("[server] WARNING: Falling back to ydotool type (may garble Unicode)")
+        subprocess.run(["ydotool", "type", "--", text], check=True, timeout=10)
     except Exception as e:
-        print(f"[server] Injection failed: {e}")
+        print(f"[server] All injection methods failed: {e}")
 
 
 @app.get("/health")
