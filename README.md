@@ -1,14 +1,30 @@
 # 🎙 Voice Dictation — Bangla → English for Hyprland
 
-Stateful voice dictation pipeline that records Bangla speech, translates it to English using local AI, and types it into the active window.
+A stateful, cloud-powered voice dictation pipeline that records Bangla speech, transcribes and translates it using Groq Cloud API, and types the result into the active window.
 
-**Stack**: PipeWire → faster-whisper (CTranslate2) → ydotool → Wayland
+**Stack**: PipeWire → Local Audio Preprocessing → Groq STT (whisper-large-v3) → Groq LLM (llama-3.1-8b-instant) → ydotool → Wayland
+
+---
+
+## Architecture
+
+This pipeline runs with zero local AI model inference overhead, making it extremely lightweight on CPU and memory:
+
+```
+F9 key → toggle_capture.sh → pw-record (16kHz WAV)
+    → audio_preprocess.py (noise reduction, bandpass filter, VAD, gain)
+    → Groq Cloud STT API (Bangla speech → Bangla text, whisper-large-v3, Free)
+    → Groq Cloud Translation API (Bangla text → English text, llama-3.1-8b-instant, Free)
+    → ydotool type (inject into active window)
+```
+
+The audio preprocessing filters noise and boosts signal quality locally (takes ~50ms on CPU) before sending it to the APIs, ensuring high recognition accuracy even with low-quality earphone mics.
 
 ---
 
 ## Prerequisites
 
-### System Packages
+### 1. System Packages
 
 ```bash
 # Arch Linux / Manjaro
@@ -21,13 +37,18 @@ sudo dnf install pipewire ydotool libnotify
 sudo apt install pipewire libnotify-bin
 ```
 
-### uv (Python Package Manager)
+### 2. uv (Python Package Manager)
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-> Already have uv? Make sure it's `>=0.4` — run `uv --version` to check.
+### 3. API Key
+
+You need a **Groq API Key**:
+- Sign up at the [Groq Console](https://console.groq.com/) and create a free API key.
+
+The entire pipeline is **100% free** under Groq's developer tier.
 
 ---
 
@@ -41,23 +62,34 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-This will:
-1. Verify all system dependencies are present
-2. Install the udev rule for `/dev/uinput` (requires sudo)
-3. Install & start the `ydotoold` systemd user service
-4. Run `uv sync` to create a `.venv` and install `faster-whisper`
-5. Make scripts executable
-6. Print the Hyprland keybind to add
+### Configure Credentials
+
+Edit the systemd service file to add your Groq API key:
+
+```bash
+nano ~/Documents/code/voice/voice-dictation.service
+```
+
+Replace `your-groq-key-here` (or the existing placeholder) with your actual `GROQ_API_KEY`.
+
+### Start the Service
+
+```bash
+# Start the service (it's symlinked to ~/.config/systemd/user/voice-dictation.service)
+systemctl --user daemon-reload
+systemctl --user enable voice-dictation
+systemctl --user start voice-dictation
+```
 
 ### Add the Hyprland Keybind
 
-Append to `~/.config/hypr/hyprland.conf`:
+Append this to `~/.config/hypr/hyprland.conf`:
 
 ```conf
 bind = , F9, exec, ~/Documents/code/voice/toggle_capture.sh
 ```
 
-Then reload:
+Reload Hyprland configurations:
 
 ```bash
 hyprctl reload
@@ -67,79 +99,86 @@ hyprctl reload
 
 ## Usage
 
-1. **Press F9** — recording starts (you'll see a notification)
-2. **Speak in Bangla**
-3. **Press F9 again** — recording stops, translation runs, English text is typed into the focused window
-
-### First Run
-
-The first invocation downloads the Whisper model (~500 MB for `small`). Subsequent runs use the cached model.
+1. **Press F9** — recording starts (you'll see a notification).
+2. **Speak in Bangla**.
+3. **Press F9 again** — recording stops, audio is preprocessed, transcribed via Groq, translated via Groq Llama, and typed into the focused window.
 
 ---
 
 ## Configuration
 
-Environment variables you can set in your shell or in the keybind:
+Environment variables you can set in your systemd service file:
 
-| Variable | Default | Options |
-|----------|---------|---------|
-| `WHISPER_MODEL` | `turbo` | `tiny`, `base`, `small`, `medium`, `large-v3`, `turbo` |
-| `WHISPER_DEVICE` | `auto` | `cpu`, `cuda`, `auto` |
-| `WHISPER_COMPUTE` | `auto` | `int8`, `float16`, `auto` |
-
-Example: use the `turbo` model on GPU:
-
-```conf
-bind = , F9, exec, WHISPER_MODEL=turbo WHISPER_DEVICE=cuda ~/Documents/code/voice/toggle_capture.sh
-```
+| Variable | Default | Options | Description |
+|----------|---------|---------|-------------|
+| `GROQ_API_KEY` | *(required)* | Your Groq API key | Auths API calls |
+| `GROQ_MODEL` | `whisper-large-v3` | `whisper-large-v3`, `whisper-large-v3-turbo` | Speech-to-Text model |
+| `GROQ_TRANS_MODEL` | `llama-3.1-8b-instant` | `llama-3.1-8b-instant`, `llama-3.3-70b-versatile` | Translation text LLM |
+| `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Custom gateway | API base URL |
 
 ---
 
-## Managing Dependencies with uv
+## Real-Time Microphone Noise Suppression (Optional)
 
-```bash
-cd ~/Documents/code/voice
+If your headset or earphone mic has loud background hiss or static, you can load a real-time noise suppression filter inside PipeWire (uses the neural RNNoise model):
 
-# Install / sync all dependencies
-uv sync
-
-# Add a new dependency
-uv add <package-name>
-
-# Run process.py directly via uv
-uv run process.py /tmp/voice_capture.wav
-
-# Lock dependencies (creates uv.lock)
-uv lock
-```
-
-> **How it works**: `uv sync` reads `pyproject.toml`, creates a `.venv` in the project directory, and installs all dependencies into it. The `toggle_capture.sh` script uses `uv run` to execute `process.py` inside this environment automatically.
-
----
-
-## File Structure
-
-```
-voice/
-├── 99-uinput.rules        # udev rule for /dev/uinput
-├── ydotoold.service        # systemd user service
-├── toggle_capture.sh       # Bash orchestrator (F9 toggle)
-├── process.py              # Translation engine (faster-whisper)
-├── pyproject.toml          # Python project definition (for uv)
-├── requirements.txt        # Pinned dependencies (fallback)
-├── setup.sh                # One-time installer
-├── hyprland.conf.snippet   # Keybind to copy into hyprland.conf
-└── README.md               # This file
-```
+1. Install the plugin:
+   ```bash
+   sudo pacman -S noise-suppression-for-voice
+   ```
+2. Enable it by creating `~/.config/pipewire/pipewire.conf.d/99-input-denoising.conf`:
+   ```bash
+   mkdir -p ~/.config/pipewire/pipewire.conf.d/
+   cat << 'EOF' > ~/.config/pipewire/pipewire.conf.d/99-input-denoising.conf
+   context.modules = [
+       { name = libpipewire-module-filter-chain
+           args = {
+               node.description = "Noise Canceling source"
+               media.name = "Noise Canceling source"
+               filter.graph = {
+                   nodes = [
+                       {
+                           type = ladspa
+                           name = rnnoise
+                           plugin = /usr/lib/ladspa/librnnoise_ladspa.so
+                           label = noise_suppressor_mono
+                           control = {
+                               "VAD Threshold (%)" 50.0
+                               "VAD Grace Period (ms)" 200
+                           }
+                       }
+                   ]
+               }
+               capture.props = {
+                   node.name = "capture.rnnoise_source"
+                   node.passive = true
+                   audio.rate = 48000
+               }
+               playback.props = {
+                   node.name = "rnnoise_source"
+                   media.class = Audio/Source
+                   audio.rate = 48000
+               }
+           }
+       }
+   ]
+   EOF
+   ```
+3. Restart PipeWire:
+   ```bash
+   systemctl --user restart pipewire pipewire-pulse
+   ```
+4. Open your volume control mixer (e.g. `pavucontrol`) and select **"Noise Canceling source"** as your default system input device.
 
 ---
 
 ## Troubleshooting
 
-| Issue | Fix |
-|-------|-----|
-| `ydotool: connect failed` | `systemctl --user start ydotoold` |
-| `/dev/uinput` permission denied | Re-login after udev rule install, or `sudo chmod 0660 /dev/uinput` |
-| No audio captured | Check `wpctl status` — ensure a capture device is active |
-| Model download stalls | Set `HF_HUB_OFFLINE=1` after first download to use cache |
-| Slow on CPU | Use `WHISPER_MODEL=tiny` or `WHISPER_MODEL=base` |
+| Issue | Cause & Fix |
+|-------|-------------|
+| `ydotool: connect failed` | Run: `systemctl --user start ydotoold` |
+| `/dev/uinput` permission denied | Check udev rules or run: `sudo chmod 0660 /dev/uinput` |
+| Server not running error | Verify status: `systemctl --user status voice-dictation` |
+| `GROQ_API_KEY not configured` | Add the key in the systemd service file or your environment. |
+| Translation is blank / silent | Speak closer to the mic; check your recording volume. |
+| Model decommissioned error | Groq updated its models. Check the configuration section and update `GROQ_TRANS_MODEL` in the service file to an active model (e.g. `llama-3.1-8b-instant`). |

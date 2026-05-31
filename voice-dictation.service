@@ -7,9 +7,14 @@ Type=simple
 WorkingDirectory=/home/alan/Documents/code/voice
 ExecStart=/home/alan/Documents/code/voice/.venv/bin/python /home/alan/Documents/code/voice/server.py
 Restart=always
-Environment=WHISPER_MODEL=turbo
-Environment=WHISPER_DEVICE=auto
-Environment=WHISPER_COMPUTE=auto
+
+# API Credentials
+Environment=GROQ_API_KEY=your-groq-key-here
+
+# API Models and Gateways
+Environment=GROQ_MODEL=whisper-large-v3
+Environment=GROQ_TRANS_MODEL=llama-3.1-8b-instant
+Environment=GROQ_BASE_URL=https://api.groq.com/openai/v1
 
 [Install]
 WantedBy=default.target

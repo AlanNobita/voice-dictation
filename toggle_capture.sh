@@ -44,7 +44,7 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 
     FILE_SIZE=$(stat -c%s "$WAV_FILE")
-    if (( FILE_SIZE < 10000 )); then
+    if (( FILE_SIZE < 5000 )); then
         notify "⚠ Error" "Audio too short or silent ($((FILE_SIZE/1024))KB)."
         rm -f "$WAV_FILE"
         exit 1

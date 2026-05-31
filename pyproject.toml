@@ -4,8 +4,13 @@ version = "1.0.0"
 description = "Bangla-to-English voice dictation pipeline for Hyprland/Wayland"
 requires-python = ">=3.10"
 dependencies = [
-    "faster-whisper>=1.1.0",
     "numpy",
+    "noisereduce>=3.0.0",
+    "scipy",
+    "openai>=1.0.0",
+    "fastapi",
+    "uvicorn",
+    "requests",
 ]
 
 [tool.uv]
